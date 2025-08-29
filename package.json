@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "prepare": "husky",
     "sync": "node ./src/scripts/envSync.js",
-    "migrate-profile-source": "node ./src/scripts/migrateProfilePictureSource.js"
+    "migrate-profile-source": "node ./src/scripts/migrateProfilePictureSource.js",
+    "list-admins": "node ./src/scripts/listAdmins.js"
   },
   "author": "",
   "license": "ISC",
