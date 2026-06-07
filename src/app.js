@@ -1,7 +1,6 @@
 const express = require("express");
 const cors = require("cors");
 
-const allowedOrigins = process.env.ALLOWED_ORIGINS
 const app = express();
 const authRoutes = require("./routes/auth.routes");
 const departmentRoutes = require("./routes/department.routes");
@@ -9,18 +8,42 @@ const profileRoutes = require("./routes/profile.routes");
 const logRoutes = require("./routes/logs.routes");
 const branchRoutes = require("./routes/branch.routes");
 const adminRoutes = require("./routes/admin.routes");
+const authController = require("./controllers/auth.controller");
+const { verifyToken } = require("./middlewares/verification.middleware");
 const apiRouter = express.Router();
 
-app.use(cors());
-// Increase payload limit for image uploads (50MB)
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-apiRouter.use('/auth', authRoutes);
-apiRouter.use('/department', departmentRoutes);
-apiRouter.use('/profile', profileRoutes);
-apiRouter.use('/logs', logRoutes);
-apiRouter.use('/branch', branchRoutes);
-apiRouter.use('/admin', adminRoutes);
-app.use('/api', apiRouter);
+const corsOptions = process.env.ALLOWED_ORIGINS
+  ? {
+      origin: process.env.ALLOWED_ORIGINS.split(",").map((origin) =>
+        origin.trim()
+      ),
+    }
+  : undefined;
+
+app.use(cors(corsOptions));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+apiRouter.use("/auth", authRoutes);
+apiRouter.use("/department", departmentRoutes);
+apiRouter.use("/profile", profileRoutes);
+apiRouter.use("/logs", logRoutes);
+apiRouter.use("/branch", branchRoutes);
+apiRouter.use("/admin", adminRoutes);
+
+// Legacy paths used by the mobile app
+apiRouter.post("/reset-password", authController.resetPassword);
+apiRouter.post("/change-password", verifyToken, authController.changePassword);
+
+app.use("/api", apiRouter);
+
+app.use((req, res) => {
+  res.status(404).json({ message: "Route not found." });
+});
+
+app.use((error, req, res, next) => {
+  console.error("Unhandled error:", error);
+  res.status(500).json({ message: "Internal Server Error" });
+});
 
 module.exports = { app };

@@ -15,7 +15,7 @@ const getProfile = async (req, res) => {
     return statusCodeTemplate(res, 404, "Invalid user id.");
 
   try {
-    const user = await User.findById(id);
+    const user = await User.findById(id).select("-password");
     if (!user) return statusCodeTemplate(res, 404, "user not found.");
 
     res.status(200).json({

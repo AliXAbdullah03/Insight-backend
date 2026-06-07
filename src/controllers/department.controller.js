@@ -12,11 +12,15 @@ const addDepartment = async (req, res) => {
   if (getMissingFields(["name"], req.body, res)) return;
 
   try {
-    const department = await Department({ name, description });
+    const department = new Department({ name, description });
     await department.save();
-    return res.status(200).json({
-      name: name,
-      description: description,
+    return res.status(201).json({
+      message: "Department added successfully.",
+      department: {
+        id: department._id,
+        name: department.name,
+        description: department.description,
+      },
     });
   } catch (error) {
     return catchTemplate(res, error);
@@ -26,8 +30,9 @@ const addDepartment = async (req, res) => {
 const getAllDepartments = async (req, res) => {
   try {
     const departments = await Department.find();
-    if (!departments)
+    if (!departments.length) {
       return statusCodeTemplate(res, 404, "No Departments found.");
+    }
 
     return res.status(200).json({
       departments,
@@ -88,8 +93,7 @@ const getUserDepartment = async (req, res) => {
 const updateUserDepartment = async (req, res) => {
   const { departmentId, userId } = req.body;
 
-  if(getMissingFields(["departmentId", "userId"], req.params, res)) return;
-
+  if (getMissingFields(["departmentId", "userId"], req.body, res)) return;
 
   if (departmentId.length < 24 || !objectIdRegex.test(departmentId))
     return statusCodeTemplate(res, 404, "Invalid department id.");

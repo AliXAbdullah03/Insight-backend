@@ -78,8 +78,31 @@ userSchema.pre("save", async function (next) {
   }
 });
 
+userSchema.pre("findOneAndUpdate", async function (next) {
+  try {
+    const update = this.getUpdate();
+    const password = update?.password ?? update?.$set?.password;
+
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+
+      if (update.password) {
+        update.password = hashedPassword;
+      }
+      if (update.$set?.password) {
+        update.$set.password = hashedPassword;
+      }
+    }
+
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-module.exports = mongoose.model("User", userSchema);
+module.exports = mongoose.model("User", userSchema, "users");

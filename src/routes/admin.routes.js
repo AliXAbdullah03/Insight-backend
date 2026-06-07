@@ -1,13 +1,19 @@
 const express = require("express");
-const { verifyToken, verifyRole } = require("../middlewares/verification.middleware");
+const {
+  verifyToken,
+  loadUser,
+  verifyRole,
+} = require("../middlewares/verification.middleware");
 const adminController = require("../controllers/admin.controller");
+
 const router = express.Router();
 
-// Admin routes (temporarily allowing all authenticated users for testing)
-router.post("/add-user", verifyToken, adminController.addUser);
-router.get("/get-all-users", verifyToken, adminController.getAllUsers);
-router.get("/get-user/:userId", verifyToken, adminController.getUserById);
-router.put("/update-user/:userId", verifyToken, adminController.updateUser);
-router.delete("/delete-user/:userId", verifyToken, adminController.deleteUser);
+router.use(verifyToken, loadUser, verifyRole(["admin"]));
 
-module.exports = router; 
+router.post("/add-user", adminController.addUser);
+router.get("/get-all-users", adminController.getAllUsers);
+router.get("/get-user/:userId", adminController.getUserById);
+router.put("/update-user/:userId", adminController.updateUser);
+router.delete("/delete-user/:userId", adminController.deleteUser);
+
+module.exports = router;

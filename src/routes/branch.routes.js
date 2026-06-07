@@ -1,15 +1,36 @@
 const express = require("express");
-const { verifyToken, verifyRole } = require("../middlewares/verification.middleware");
+const {
+  verifyToken,
+  loadUser,
+  verifyRole,
+} = require("../middlewares/verification.middleware");
 const branchController = require("../controllers/branch.controller");
+
 const router = express.Router();
 
-// Admin only routes (require authentication only)
-router.post("/add-branch", verifyToken, branchController.addBranch);
-router.put("/update-branch/:branchId", verifyToken, verifyRole(["admin"]), branchController.updateBranch);
-router.delete("/delete-branch/:branchId", verifyToken, verifyRole(["admin"]), branchController.deleteBranch);
+router.post(
+  "/add-branch",
+  verifyToken,
+  loadUser,
+  verifyRole(["admin"]),
+  branchController.addBranch
+);
+router.put(
+  "/update-branch/:branchId",
+  verifyToken,
+  loadUser,
+  verifyRole(["admin"]),
+  branchController.updateBranch
+);
+router.delete(
+  "/delete-branch/:branchId",
+  verifyToken,
+  loadUser,
+  verifyRole(["admin"]),
+  branchController.deleteBranch
+);
 
-// Public routes (no authentication required)
 router.get("/get-all-branches", branchController.getAllBranches);
 router.get("/get-branch/:branchId", branchController.getBranchById);
 
-module.exports = router; 
+module.exports = router;

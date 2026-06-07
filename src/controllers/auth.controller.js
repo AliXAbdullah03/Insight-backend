@@ -7,7 +7,7 @@ const {
 } = require("../utils/api.utils");
 const { allowedRoles } = require("../utils/model.utils");
 const { setStatus } = require("../utils/status.utils");
-const EmailUtils = require("../utils/email.utils").default;
+const EmailUtils = require("../utils/email.utils");
 
 const login = async (email, password, role, res, authType = "login") => {
   const jwtSecret = process.env.JWT_SECRET;
@@ -56,6 +56,8 @@ const login = async (email, password, role, res, authType = "login") => {
 };
 
 const otpStore = {};
+const passwordResetVerified = {};
+const PASSWORD_RESET_WINDOW_MS = 15 * 60 * 1000;
 
 exports.sendOTP = async (req, res) => {
   const { email } = req.body;
@@ -86,7 +88,9 @@ exports.verifyOTP = (req, res) => {
   if (record.otp !== otp) {
     return statusCodeTemplate(res, 400, "Invalid OTP.");
   }
-  delete otpStore[email];  
+
+  delete otpStore[email];
+  passwordResetVerified[email] = { verifiedAt: Date.now() };
   return res.status(200).json({ message: "OTP verified successfully." });
 };
 
@@ -172,6 +176,24 @@ exports.resetPassword = async (req, res) => {
   const { email, password } = req.body;
   if (getMissingFields(["email", "password"], req.body, res)) return;
 
+  const verification = passwordResetVerified[email];
+  if (!verification) {
+    return statusCodeTemplate(
+      res,
+      400,
+      "Email not verified. Please verify OTP first."
+    );
+  }
+
+  if (Date.now() - verification.verifiedAt > PASSWORD_RESET_WINDOW_MS) {
+    delete passwordResetVerified[email];
+    return statusCodeTemplate(
+      res,
+      400,
+      "Verification expired. Please verify OTP again."
+    );
+  }
+
   try {
     const user = await User.findOne({ email });
     if (!user) {
@@ -180,6 +202,7 @@ exports.resetPassword = async (req, res) => {
 
     user.password = password;
     await user.save();
+    delete passwordResetVerified[email];
 
     return statusCodeTemplate(res, 200, "Password updated successfully.");
   } catch (error) {

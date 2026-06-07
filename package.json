@@ -4,6 +4,8 @@
   "main": "./src/server.js",
   "scripts": {
     "dev": "nodemon ./src/server.js",
+    "start": "node ./src/server.js",
+    "setup-db": "node ./src/scripts/setupDb.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "prepare": "husky",
     "sync": "node ./src/scripts/envSync.js",
