@@ -8,6 +8,7 @@ const profileRoutes = require("./routes/profile.routes");
 const logRoutes = require("./routes/logs.routes");
 const branchRoutes = require("./routes/branch.routes");
 const adminRoutes = require("./routes/admin.routes");
+const alertRoutes = require("./routes/alert.routes");
 const authController = require("./controllers/auth.controller");
 const { verifyToken } = require("./middlewares/verification.middleware");
 const apiRouter = express.Router();
@@ -30,12 +31,16 @@ apiRouter.use("/profile", profileRoutes);
 apiRouter.use("/logs", logRoutes);
 apiRouter.use("/branch", branchRoutes);
 apiRouter.use("/admin", adminRoutes);
+apiRouter.use("/alerts", alertRoutes);
 
 // Legacy paths used by the mobile app
 apiRouter.post("/reset-password", authController.resetPassword);
 apiRouter.post("/change-password", verifyToken, authController.changePassword);
 
 app.use("/api", apiRouter);
+
+// Garage notifier expects MOBILE_BACKEND_URL=.../alerts (not under /api)
+app.use("/alerts", alertRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ message: "Route not found." });
