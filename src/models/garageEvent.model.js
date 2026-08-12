@@ -14,10 +14,12 @@ const boxSchema = new mongoose.Schema(
 
 const garageEventSchema = new mongoose.Schema(
   {
+    org_id: { type: String, index: true, default: null },
+    org_token: { type: String, index: true, default: null },
+    org_name: { type: String, default: null },
     alert_id: {
       type: String,
       required: true,
-      unique: true,
       index: true,
     },
     channel: {
@@ -71,6 +73,8 @@ const garageEventSchema = new mongoose.Schema(
       fullscreen_critical: { type: Boolean, default: false },
       color: { type: String, default: "#FF8C00" },
     },
+    read: { type: Boolean, default: false, index: true },
+    read_at: { type: Date, default: null },
     delivered_at: { type: Date, default: null },
   },
   {
@@ -78,5 +82,7 @@ const garageEventSchema = new mongoose.Schema(
     collection: "garage_events",
   }
 );
+
+garageEventSchema.index({ org_token: 1, alert_id: 1 }, { unique: true });
 
 module.exports = mongoose.model("GarageEvent", garageEventSchema);

@@ -9,6 +9,10 @@ const logRoutes = require("./routes/logs.routes");
 const branchRoutes = require("./routes/branch.routes");
 const adminRoutes = require("./routes/admin.routes");
 const alertRoutes = require("./routes/alert.routes");
+const orgRoutes = require("./routes/org.routes");
+const orgAdminRoutes = require("./routes/orgAdmin.routes");
+const orgController = require("./controllers/org.controller");
+const { requireOrgToken } = require("./middlewares/org.middleware");
 const authController = require("./controllers/auth.controller");
 const { verifyToken } = require("./middlewares/verification.middleware");
 const apiRouter = express.Router();
@@ -26,10 +30,15 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 apiRouter.use("/auth", authRoutes);
+apiRouter.use("/org", orgRoutes);
+apiRouter.get("/violations", requireOrgToken, orgController.listViolations);
+apiRouter.get("/status", requireOrgToken, orgController.listOrgCameraStatus);
 apiRouter.use("/department", departmentRoutes);
 apiRouter.use("/profile", profileRoutes);
 apiRouter.use("/logs", logRoutes);
 apiRouter.use("/branch", branchRoutes);
+// Org admin helpers must be registered before JWT-protected /admin user routes.
+apiRouter.use("/admin", orgAdminRoutes);
 apiRouter.use("/admin", adminRoutes);
 apiRouter.use("/alerts", alertRoutes);
 

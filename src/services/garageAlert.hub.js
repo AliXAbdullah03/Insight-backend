@@ -1,9 +1,12 @@
 const { EventEmitter } = require("events");
 
-/** In-process fan-out so SSE / live clients get alerts instantly. */
+/** In-process fan-out so SSE / live clients get alerts instantly, scoped by org. */
 class GarageAlertHub extends EventEmitter {
-  broadcast(alert) {
-    this.emit("alert", alert);
+  broadcast(alert, orgToken) {
+    this.emit("alert", alert, orgToken || alert?.org_token || null);
+    if (orgToken || alert?.org_token) {
+      this.emit(`alert:${orgToken || alert.org_token}`, alert);
+    }
   }
 }
 

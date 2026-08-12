@@ -2,10 +2,12 @@ const mongoose = require("mongoose");
 
 const garageCameraStatusSchema = new mongoose.Schema(
   {
+    org_id: { type: String, index: true, default: null },
+    org_token: { type: String, index: true, default: null },
+    org_name: { type: String, default: null },
     camera_id: {
       type: String,
       required: true,
-      unique: true,
       index: true,
     },
     status: {
@@ -31,8 +33,13 @@ const garageCameraStatusSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-    collection: "garage_camera_status",
+    collection: "camera_status",
   }
+);
+
+garageCameraStatusSchema.index(
+  { org_token: 1, camera_id: 1 },
+  { unique: true, partialFilterExpression: { org_token: { $type: "string" } } }
 );
 
 module.exports = mongoose.model(
