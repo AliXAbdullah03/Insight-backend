@@ -34,6 +34,16 @@ apiRouter.use("/auth", authRoutes);
 apiRouter.use("/org", orgRoutes);
 apiRouter.get("/violations", orgController.listViolations);
 apiRouter.get("/status", orgController.listOrgCameraStatus);
+apiRouter.get("/persons", orgController.listPersons);
+apiRouter.get("/analytics/dashboard", orgController.getAnalyticsDashboard);
+apiRouter.get("/analytics/today", orgController.getAnalyticsToday);
+apiRouter.get("/analytics/history", orgController.listDailyAnalytics);
+apiRouter.get("/analytics/employees", orgController.listEmployees);
+apiRouter.get(
+  "/analytics/employees/:person_id",
+  orgController.getEmployeeProfile
+);
+apiRouter.get("/analytics/insights", orgController.listInsights);
 apiRouter.use("/mobile", mobileRoutes);
 apiRouter.use(mobileRoutes);
 apiRouter.use("/ai", aiProxyRoutes);

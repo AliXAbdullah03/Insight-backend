@@ -57,6 +57,13 @@ async function requireValidOrg(req, res) {
   return { token, org };
 }
 
+function hasUsefulAiPayload(value) {
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
+}
+
 async function tryAiThenMongo({
   token,
   aiCall,
@@ -69,7 +76,9 @@ async function tryAiThenMongo({
     const ai = await aiCall();
     if (ai.status >= 200 && ai.status < 300 && ai.body) {
       const picked = pickBody ? pickBody(ai.body) : ai.body;
-      if (picked != null) return { fromAi: true, body: ai.body, picked };
+      if (hasUsefulAiPayload(picked)) {
+        return { fromAi: true, body: ai.body, picked };
+      }
     }
   } catch (proxyError) {
     console.error("Garage AI proxy skipped:", proxyError.message);
@@ -77,6 +86,79 @@ async function tryAiThenMongo({
 
   const rows = await findScopedDocs(collection, token, { sort, limit });
   return { fromAi: false, rows };
+}
+
+function personFromViolation(row) {
+  const details =
+    row?.details && typeof row.details === "object" ? row.details : {};
+  const boxes = Array.isArray(row?.boxes)
+    ? row.boxes
+    : Array.isArray(details.boxes)
+      ? details.boxes
+      : [];
+  const label = boxes.map((box) => box && box.label).find(Boolean);
+  const personId = String(
+    row?.person_id ||
+      row?.employee_id ||
+      row?.track_id ||
+      details.track_key ||
+      details.person_id ||
+      label ||
+      ""
+  ).trim();
+  if (!personId) return null;
+  const name = String(
+    row?.display_name ||
+      row?.person_name ||
+      row?.employee_name ||
+      row?.name ||
+      label ||
+      personId
+  ).trim();
+  return { person_id: personId, name };
+}
+
+function scoreFromIncidents(type, count) {
+  const penalty =
+    type === "fight" ? 25 : type === "smoking" ? 15 : type === "phone" ? 10 : 8;
+  return Math.max(0, 100 - count * penalty);
+}
+
+async function employeesFromLiveData(token) {
+  let employees = await findScopedDocs("employee_profiles", token, {
+    sort: { name: 1 },
+    limit: 500,
+  });
+  if (!employees.length) {
+    employees = await findScopedDocs("person_identities", token, {
+      sort: { name: 1 },
+      limit: 500,
+    });
+  }
+  if (employees.length) return employees;
+
+  const violations = await findScopedDocs("violations", token, {
+    sort: { timestamp: -1 },
+    limit: 500,
+  });
+  const byId = new Map();
+  for (const row of violations) {
+    const person = personFromViolation(row);
+    if (!person) continue;
+    const prev = byId.get(person.person_id);
+    const incidentCount = (prev?.incident_count || 0) + 1;
+    const type = String(row.event_type || row.type || "").toLowerCase();
+    byId.set(person.person_id, {
+      person_id: person.person_id,
+      display_name: person.name,
+      name: person.name,
+      incident_count: incidentCount,
+      behavior_score: scoreFromIncidents(type, incidentCount),
+    });
+  }
+  return [...byId.values()].sort(
+    (a, b) => (b.behavior_score || 0) - (a.behavior_score || 0)
+  );
 }
 
 /** POST /api/auth/org-token  { token } — Mongo org_tokens */
@@ -405,7 +487,11 @@ const getAnalyticsDashboard = async (req, res) => {
 
     try {
       const ai = await fetchAiDashboard(token);
-      if (ai.status >= 200 && ai.status < 300 && ai.body) {
+      if (
+        ai.status >= 200 &&
+        ai.status < 300 &&
+        hasUsefulAiPayload(ai.body?.dashboard || ai.body?.today || ai.body)
+      ) {
         return res.status(200).json({
           ok: true,
           ...ai.body,
@@ -445,7 +531,11 @@ const getAnalyticsToday = async (req, res) => {
 
     try {
       const ai = await fetchAiToday(token);
-      if (ai.status >= 200 && ai.status < 300 && ai.body) {
+      if (
+        ai.status >= 200 &&
+        ai.status < 300 &&
+        hasUsefulAiPayload(ai.body?.today || ai.body?.dashboard)
+      ) {
         return res.status(200).json({
           ok: true,
           ...ai.body,
@@ -460,10 +550,38 @@ const getAnalyticsToday = async (req, res) => {
       sort: { date: -1 },
       limit: 1,
     });
+    if (rows[0] && Object.keys(rows[0]).length) {
+      return res.status(200).json({
+        ok: true,
+        today: rows[0],
+        organization: toPublicOrg(org),
+      });
+    }
+
+    const employees = await employeesFromLiveData(token);
+    const violations = await findScopedDocs("violations", token, {
+      sort: { timestamp: -1 },
+      limit: 200,
+    });
+    const byType = {};
+    for (const row of violations) {
+      const type = String(row.event_type || row.type || "other").toLowerCase();
+      byType[type] = (byType[type] || 0) + 1;
+    }
 
     return res.status(200).json({
       ok: true,
-      today: rows[0] || {},
+      today: {
+        date: new Date().toISOString().slice(0, 10),
+        org_name: org.name,
+        top_employees: employees.slice(0, 10),
+        behavior_score: employees[0]?.behavior_score || 0,
+        totals: {
+          violation_total: violations.length,
+          ...byType,
+        },
+        recent_behaviors: violations.slice(0, 10),
+      },
       organization: toPublicOrg(org),
     });
   } catch (error) {
@@ -503,11 +621,12 @@ const listEmployees = async (req, res) => {
 
     try {
       const ai = await fetchAiEmployees(token);
-      if (ai.status >= 200 && ai.status < 300 && ai.body) {
+      const employees =
+        ai.body?.employees || ai.body?.staff || ai.body?.persons || [];
+      if (ai.status >= 200 && ai.status < 300 && hasUsefulAiPayload(employees)) {
         return res.status(200).json({
           ok: true,
-          employees:
-            ai.body.employees || ai.body.staff || ai.body.persons || [],
+          employees,
           organization: toPublicOrg(org),
         });
       }
@@ -515,20 +634,9 @@ const listEmployees = async (req, res) => {
       console.error("AI employees proxy skipped:", proxyError.message);
     }
 
-    let employees = await findScopedDocs("employee_profiles", token, {
-      sort: { name: 1 },
-      limit: 500,
-    });
-    if (!employees.length) {
-      employees = await findScopedDocs("person_identities", token, {
-        sort: { name: 1 },
-        limit: 500,
-      });
-    }
-
     return res.status(200).json({
       ok: true,
-      employees,
+      employees: await employeesFromLiveData(token),
       organization: toPublicOrg(org),
     });
   } catch (error) {
@@ -549,10 +657,16 @@ const getEmployeeProfile = async (req, res) => {
 
     try {
       const ai = await fetchAiEmployee(token, personId);
-      if (ai.status >= 200 && ai.status < 300 && ai.body) {
+      const employee = ai.body?.employee || ai.body;
+      if (
+        ai.status >= 200 &&
+        ai.status < 300 &&
+        hasUsefulAiPayload(employee) &&
+        (employee.person_id || employee.name || employee.display_name)
+      ) {
         return res.status(200).json({
           ok: true,
-          employee: ai.body.employee || ai.body,
+          employee,
           organization: toPublicOrg(org),
         });
       }
