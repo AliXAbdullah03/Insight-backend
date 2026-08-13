@@ -35,6 +35,7 @@ apiRouter.use("/org", orgRoutes);
 apiRouter.get("/violations", orgController.listViolations);
 apiRouter.get("/status", orgController.listOrgCameraStatus);
 apiRouter.use("/mobile", mobileRoutes);
+apiRouter.use(mobileRoutes);
 apiRouter.use("/ai", aiProxyRoutes);
 apiRouter.use("/department", departmentRoutes);
 apiRouter.use("/profile", profileRoutes);
