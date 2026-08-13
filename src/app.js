@@ -12,6 +12,7 @@ const alertRoutes = require("./routes/alert.routes");
 const orgRoutes = require("./routes/org.routes");
 const orgAdminRoutes = require("./routes/orgAdmin.routes");
 const aiProxyRoutes = require("./routes/aiProxy.routes");
+const mobileRoutes = require("./routes/mobile.routes");
 const orgController = require("./controllers/org.controller");
 const authController = require("./controllers/auth.controller");
 const { verifyToken } = require("./middlewares/verification.middleware");
@@ -33,6 +34,7 @@ apiRouter.use("/auth", authRoutes);
 apiRouter.use("/org", orgRoutes);
 apiRouter.get("/violations", orgController.listViolations);
 apiRouter.get("/status", orgController.listOrgCameraStatus);
+apiRouter.use("/mobile", mobileRoutes);
 apiRouter.use("/ai", aiProxyRoutes);
 apiRouter.use("/department", departmentRoutes);
 apiRouter.use("/profile", profileRoutes);
@@ -48,6 +50,9 @@ apiRouter.post("/reset-password", authController.resetPassword);
 apiRouter.post("/change-password", verifyToken, authController.changePassword);
 
 app.use("/api", apiRouter);
+
+// Garage mobile APIs (org token only — no separate API key)
+app.use("/mobile", mobileRoutes);
 
 // Garage notifier expects MOBILE_BACKEND_URL=.../alerts (not under /api)
 app.use("/alerts", alertRoutes);

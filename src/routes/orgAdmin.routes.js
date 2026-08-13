@@ -3,7 +3,7 @@ const orgController = require("../controllers/org.controller");
 
 const router = express.Router();
 
-// Garage-style admin helpers (protected by MOBILE_BACKEND_TOKEN when set)
+// Garage-style admin helpers (optional shared secret when seeding)
 router.post("/organizations", orgController.createOrganization);
 router.post(
   "/organizations/:org_id/rotate-token",

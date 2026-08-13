@@ -8,6 +8,7 @@ const {
 const {
   extractOrgToken,
   findActiveOrganizationByToken,
+  rejectInvalidOrgToken,
 } = require("../services/org.service");
 const { statusCodeTemplate, catchTemplate } = require("../utils/api.utils");
 
@@ -47,40 +48,6 @@ function toPublicAlert(doc) {
         ? obj.createdAt.toISOString()
         : obj.createdAt || null,
   };
-}
-
-function verifyMobileBackendToken(req, res) {
-  const expected = process.env.MOBILE_BACKEND_TOKEN;
-  if (!expected) {
-    return true;
-  }
-
-  const authHeader = req.headers.authorization || "";
-  // Garage may send X-Org-Token separately; MOBILE_BACKEND_TOKEN is optional shared secret.
-  if (req.headers["x-mobile-backend-token"] === expected) {
-    return true;
-  }
-  if (!authHeader.startsWith("Bearer ")) {
-    // Allow if org token path will validate instead when MOBILE_BACKEND_TOKEN unset semantics:
-    // If expected is set, require either Bearer shared secret OR we'll still require org later.
-    // Keep strict: Bearer must match shared secret when configured, unless X-Org-Token present
-    // and shared secret is only for garage machines that also send org token.
-    const orgHeader = req.headers["x-org-token"];
-    if (orgHeader) {
-      return true;
-    }
-    statusCodeTemplate(res, 401, "Bearer Token missing.");
-    return false;
-  }
-
-  const token = authHeader.slice("Bearer ".length).trim();
-  // Bearer may be org token OR shared mobile backend token
-  if (token === expected || token.startsWith("org_")) {
-    return true;
-  }
-
-  statusCodeTemplate(res, 403, "Invalid mobile backend token.");
-  return false;
 }
 
 function normalizeIncomingAlert(body, org) {
@@ -140,10 +107,6 @@ function normalizeIncomingAlert(body, org) {
 
 const receiveGarageAlert = async (req, res) => {
   try {
-    if (!verifyMobileBackendToken(req, res)) {
-      return;
-    }
-
     const body = req.body || {};
     const channel = body.channel;
     const action = body.action;
@@ -180,11 +143,7 @@ const receiveGarageAlert = async (req, res) => {
 
     const org = await findActiveOrganizationByToken(orgToken);
     if (!org) {
-      return statusCodeTemplate(
-        res,
-        403,
-        "Invalid or inactive organization token."
-      );
+      return rejectInvalidOrgToken(res);
     }
 
     const normalized = normalizeIncomingAlert(body, org);

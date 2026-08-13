@@ -2,24 +2,27 @@ const {
   extractOrgToken,
   findActiveOrganizationByToken,
   toPublicOrg,
+  rejectInvalidOrgToken,
 } = require("../services/org.service");
-const { statusCodeTemplate } = require("../utils/api.utils");
 
 /**
  * Requires a valid active organization token via:
  * Authorization: Bearer <org_token>  OR  X-Org-Token: <org_token>
- * Attaches req.org and req.orgToken.
+ * Lookup is Mongo `org_tokens` (active: true). No separate API key.
  */
 async function requireOrgToken(req, res, next) {
   try {
     const token = extractOrgToken(req);
     if (!token) {
-      return statusCodeTemplate(res, 401, "Organization token missing.");
+      return res.status(401).json({
+        ok: false,
+        message: "Organization token missing.",
+      });
     }
 
     const org = await findActiveOrganizationByToken(token);
     if (!org) {
-      return statusCodeTemplate(res, 403, "Invalid or inactive organization token.");
+      return rejectInvalidOrgToken(res);
     }
 
     req.orgToken = token;
@@ -28,7 +31,10 @@ async function requireOrgToken(req, res, next) {
     return next();
   } catch (error) {
     console.error("requireOrgToken error:", error);
-    return statusCodeTemplate(res, 500, "Failed to validate organization token.");
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to validate organization token.",
+    });
   }
 }
 
