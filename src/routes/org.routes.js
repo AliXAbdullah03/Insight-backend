@@ -1,9 +1,9 @@
 const express = require("express");
 const orgController = require("../controllers/org.controller");
-const { requireOrgToken } = require("../middlewares/org.middleware");
 
 const router = express.Router();
 
-router.get("/me", requireOrgToken, orgController.getOrgMe);
+// Token is validated by proxying to garage AI /mobile/me (no local Mongo required).
+router.get("/me", orgController.getOrgMe);
 
 module.exports = router;
