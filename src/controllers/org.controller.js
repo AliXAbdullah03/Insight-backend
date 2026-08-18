@@ -9,11 +9,8 @@ const {
 const {
   fetchAiViolations,
   fetchAiCameraStatus,
-  fetchAiPersons,
   fetchAiDashboard,
   fetchAiToday,
-  fetchAiEmployees,
-  fetchAiEmployee,
   fetchAiMedia,
 } = require("../services/aiProxy.service");
 const { generateOrgInsights } = require("../services/inklingInsights.service");
@@ -143,6 +140,10 @@ function stripHeavyFields(row) {
   return obj;
 }
 
+function personKey(row) {
+  return String(row?.person_id || row?.employee_id || row?.track_id || "").trim();
+}
+
 function publicEmployee(row) {
   const raw = stripHeavyFields(row);
   const scores = asObject(raw.scores);
@@ -205,18 +206,44 @@ function publicEmployee(row) {
 }
 
 async function employeesFromLiveData(token) {
-  let employees = await findScopedDocs("employee_profiles", token, {
-    sort: { display_name: 1 },
-    limit: 500,
-  });
-  if (!employees.length) {
-    employees = await findScopedDocs("person_identities", token, {
+  const [profiles, identities] = await Promise.all([
+    findScopedDocs("employee_profiles", token, {
       sort: { display_name: 1 },
       limit: 500,
+    }),
+    findScopedDocs("person_identities", token, {
+      sort: { display_name: 1 },
+      limit: 500,
+    }),
+  ]);
+
+  const byId = new Map();
+  for (const identity of identities) {
+    const id = personKey(identity);
+    if (!id) continue;
+    byId.set(id, {
+      ...stripHeavyFields(identity),
+      person_id: id,
+      identity: stripHeavyFields(identity),
     });
   }
-  if (employees.length) {
-    return employees.map(publicEmployee).sort(
+  for (const profile of profiles) {
+    const id = personKey(profile);
+    if (!id) continue;
+    const prev = byId.get(id) || {};
+    byId.set(id, {
+      ...prev,
+      ...stripHeavyFields(profile),
+      person_id: id,
+      identity: {
+        ...asObject(prev.identity),
+        ...asObject(profile.identity),
+      },
+    });
+  }
+
+  if (byId.size) {
+    return [...byId.values()].map(publicEmployee).sort(
       (a, b) => (b.behavior_score || 0) - (a.behavior_score || 0)
     );
   }
@@ -225,14 +252,14 @@ async function employeesFromLiveData(token) {
     sort: { timestamp: -1 },
     limit: 500,
   });
-  const byId = new Map();
+  const fromViolations = new Map();
   for (const row of violations) {
     const person = personFromViolation(row);
     if (!person) continue;
-    const prev = byId.get(person.person_id);
+    const prev = fromViolations.get(person.person_id);
     const incidentCount = (prev?.incident_count || 0) + 1;
     const type = String(row.event_type || row.type || "").toLowerCase();
-    byId.set(person.person_id, {
+    fromViolations.set(person.person_id, {
       person_id: person.person_id,
       display_name: person.name,
       name: person.name,
@@ -240,7 +267,7 @@ async function employeesFromLiveData(token) {
       behavior_score: scoreFromIncidents(type, incidentCount),
     });
   }
-  return [...byId.values()].map(publicEmployee).sort(
+  return [...fromViolations.values()].map(publicEmployee).sort(
     (a, b) => (b.behavior_score || 0) - (a.behavior_score || 0)
   );
 }
@@ -258,6 +285,115 @@ function eventFromRow(row, source) {
     confidence: row.confidence ?? null,
     status: row.status || null,
     source,
+  };
+}
+
+async function employeeDetailFromLiveData(token, personId) {
+  const extra = {
+    $or: [
+      { person_id: personId },
+      { employee_id: personId },
+      { track_id: personId },
+      { display_name: personId },
+    ],
+  };
+  const [profile] = await findScopedDocs("employee_profiles", token, {
+    extra,
+    limit: 1,
+  });
+  const [identity] = await findScopedDocs("person_identities", token, {
+    extra,
+    limit: 1,
+  });
+  if (!profile && !identity) return null;
+
+  const merged = {
+    ...(identity || {}),
+    ...(profile || {}),
+    identity: stripHeavyFields({
+      ...asObject(identity),
+      ...asObject(profile?.identity),
+    }),
+  };
+  const base = publicEmployee(merged);
+
+  const snapshots = await findScopedDocs("behavior_snapshots", token, {
+    extra: {
+      $or: [
+        { person_id: personId },
+        { employee_id: personId },
+        { person_ids: personId },
+        { "persons.person_id": personId },
+      ],
+    },
+    sort: { timestamp: -1 },
+    limit: 12,
+  });
+  const cameraId = base.last_camera_id || identity?.last_camera_id;
+  const snapshotRows = snapshots.length
+    ? snapshots
+    : cameraId
+      ? await findScopedDocs("behavior_snapshots", token, {
+          extra: { camera_id: cameraId },
+          sort: { timestamp: -1 },
+          limit: 6,
+        })
+      : [];
+
+  const history = await findScopedDocs("daily_analytics", token, {
+    sort: { date: -1 },
+    limit: 14,
+  });
+  const chart = [...history].reverse().map((day) => {
+    const top = (Array.isArray(day.top_employees) ? day.top_employees : []).find(
+      (row) =>
+        String(row.person_id || "") === personId ||
+        String(row.display_name || row.name || "") === base.name
+    );
+    return {
+      date: day.date,
+      behavior_score: asNumber(
+        top?.behavior_score ?? top?.score ?? base.behavior_score,
+        base.behavior_score
+      ),
+    };
+  });
+
+  const recent = [];
+  for (const day of history.slice(0, 3)) {
+    for (const row of Array.isArray(day.recent_behaviors)
+      ? day.recent_behaviors
+      : []) {
+      const id = String(row.person_id || row.display_name || "");
+      if (id !== personId && id !== base.name) continue;
+      recent.push(eventFromRow({ ...row, date: day.date }, "daily_analytics"));
+    }
+  }
+
+  const peers = (await employeesFromLiveData(token)).map((row) => ({
+    person_id: row.person_id,
+    name: row.name,
+    score: row.behavior_score,
+  }));
+
+  return {
+    ...base,
+    snapshots: snapshotRows
+      .map((row) => {
+        const rel = snapshotRelFromDoc(row);
+        if (!rel) return null;
+        return {
+          path: rel,
+          image_url: publicSnapshotUrl(rel),
+          timestamp: row.timestamp || row.created_at || null,
+          camera_name: row.camera_name || row.camera_id || null,
+          event_type: row.event_type || row.kind || null,
+        };
+      })
+      .filter(Boolean),
+    recent_events: recent.slice(0, 20),
+    chart,
+    peers,
   };
 }
 
@@ -615,25 +751,7 @@ const listPersons = async (req, res) => {
     if (!auth) return;
     const { token, org } = auth;
 
-    const result = await tryAiThenMongo({
-      token,
-      aiCall: () => fetchAiPersons(token),
-      pickBody: (body) => body.persons || body.people || body.staff || null,
-      collection: "person_identities",
-      sort: { updated_at: -1 },
-      limit: 500,
-    });
-
-    const persons = (result.fromAi
-      ? result.body.persons ||
-        result.body.people ||
-        result.body.staff ||
-        result.picked ||
-        []
-      : result.rows
-    ).map((row) =>
-      result.fromAi ? stripHeavyFields(row) : publicEmployee(row)
-    );
+    const persons = await employeesFromLiveData(token);
 
     return res.status(200).json({
       ok: true,
@@ -787,31 +905,6 @@ const listEmployees = async (req, res) => {
     const { token, org } = auth;
 
     const fromMongo = await employeesFromLiveData(token);
-    if (fromMongo.length) {
-      return res.status(200).json({
-        ok: true,
-        employees: fromMongo,
-        organization: toPublicOrg(org),
-      });
-    }
-
-    try {
-      const ai = await fetchAiEmployees(token);
-      const employees =
-        ai.body?.employees || ai.body?.staff || ai.body?.persons || [];
-      if (ai.status >= 200 && ai.status < 300 && hasUsefulAiPayload(employees)) {
-        return res.status(200).json({
-          ok: true,
-          employees: employees.map((row) =>
-            row && typeof row === "object" ? publicEmployee(row) : row
-          ),
-          organization: toPublicOrg(org),
-        });
-      }
-    } catch (proxyError) {
-      console.error("AI employees proxy skipped:", proxyError.message);
-    }
-
     return res.status(200).json({
       ok: true,
       employees: fromMongo,
@@ -833,52 +926,18 @@ const getEmployeeProfile = async (req, res) => {
       return statusCodeTemplate(res, 400, "Missing person_id");
     }
 
-    try {
-      const ai = await fetchAiEmployee(token, personId);
-      const employee = ai.body?.employee || ai.body;
-      if (
-        ai.status >= 200 &&
-        ai.status < 300 &&
-        hasUsefulAiPayload(employee) &&
-        (employee.person_id || employee.name || employee.display_name)
-      ) {
-        return res.status(200).json({
-          ok: true,
-          employee,
-          organization: toPublicOrg(org),
-        });
-      }
-    } catch (proxyError) {
-      console.error("AI employee proxy skipped:", proxyError.message);
-    }
-
-    const extra = {
-      $or: [
-        { person_id: personId },
-        { employee_id: personId },
-        { track_id: personId },
-      ],
-    };
-    const [profile] =
-      (await findScopedDocs("employee_profiles", token, {
-        extra,
-        limit: 1,
-      })) || [];
-    const [person] =
-      profile
-        ? [profile]
-        : await findScopedDocs("person_identities", token, {
-            extra,
-            limit: 1,
-          });
-
-    if (!person) {
-      return statusCodeTemplate(res, 404, "Employee not found for this organization.");
+    const employee = await employeeDetailFromLiveData(token, personId);
+    if (!employee) {
+      return statusCodeTemplate(
+        res,
+        404,
+        "Employee not found for this organization."
+      );
     }
 
     return res.status(200).json({
       ok: true,
-      employee: publicEmployee(person),
+      employee,
       organization: toPublicOrg(org),
     });
   } catch (error) {
