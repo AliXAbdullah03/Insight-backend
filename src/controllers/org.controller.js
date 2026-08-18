@@ -124,18 +124,102 @@ function scoreFromIncidents(type, count) {
   return Math.max(0, 100 - count * penalty);
 }
 
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+}
+
+function asNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function stripHeavyFields(row) {
+  const obj = omitOrgSecrets(row) || {};
+  delete obj.embeddings;
+  delete obj.enrolled_photo_jpeg;
+  delete obj.payload;
+  return obj;
+}
+
+function publicEmployee(row) {
+  const raw = stripHeavyFields(row);
+  const scores = asObject(raw.scores);
+  const incidents = asObject(raw.incidents);
+  const attendance = asObject(raw.attendance);
+  const away = asObject(raw.away_time);
+  const identity = asObject(raw.identity);
+  const personId = String(
+    raw.person_id || raw.employee_id || raw.track_id || ""
+  ).trim();
+  const name = String(
+    raw.display_name || raw.name || identity.display_name || personId || "Staff"
+  ).trim();
+  const incidentCount = asNumber(
+    incidents.total ?? raw.incident_count ?? raw.violation_count,
+    0
+  );
+  const behaviorScore = asNumber(
+    scores.behavior_score ?? raw.behavior_score ?? raw.score,
+    0
+  );
+  return {
+    person_id: personId,
+    employee_id: personId,
+    name,
+    display_name: name,
+    behavior_score: behaviorScore,
+    score: behaviorScore,
+    productivity_score: asNumber(
+      scores.productivity_score ?? raw.productivity_score,
+      0
+    ),
+    working_ratio: asNumber(scores.working_ratio ?? raw.working_ratio, 0),
+    working_hours: asNumber(scores.working_hours ?? raw.working_hours, 0),
+    incident_count: incidentCount,
+    violation_count: incidentCount,
+    event_count: incidentCount,
+    incidents: {
+      fight: asNumber(incidents.fight, 0),
+      smoking: asNumber(incidents.smoking, 0),
+      phone: asNumber(incidents.phone, 0),
+      away: asNumber(incidents.away, 0),
+      total: incidentCount,
+    },
+    attendance_rate: asNumber(
+      attendance.rate ?? attendance.attendance_rate ?? raw.attendance_rate,
+      behaviorScore
+    ),
+    attendance_count: asNumber(
+      attendance.count ?? attendance.days_present ?? raw.attendance_count,
+      0
+    ),
+    away_minutes: asNumber(away.minutes ?? away.total_minutes, 0),
+    last_seen: identity.last_seen_at || raw.last_seen_at || raw.updated_at || null,
+    last_camera_id: identity.last_camera_id || raw.last_camera_id || null,
+    department: raw.department || raw.org_name || "Garage",
+    status: raw.active === false ? "inactive" : "active",
+    source: raw.source || "mongo",
+  };
+}
+
 async function employeesFromLiveData(token) {
   let employees = await findScopedDocs("employee_profiles", token, {
-    sort: { name: 1 },
+    sort: { display_name: 1 },
     limit: 500,
   });
   if (!employees.length) {
     employees = await findScopedDocs("person_identities", token, {
-      sort: { name: 1 },
+      sort: { display_name: 1 },
       limit: 500,
     });
   }
-  if (employees.length) return employees;
+  if (employees.length) {
+    return employees.map(publicEmployee).sort(
+      (a, b) => (b.behavior_score || 0) - (a.behavior_score || 0)
+    );
+  }
 
   const violations = await findScopedDocs("violations", token, {
     sort: { timestamp: -1 },
@@ -156,9 +240,76 @@ async function employeesFromLiveData(token) {
       behavior_score: scoreFromIncidents(type, incidentCount),
     });
   }
-  return [...byId.values()].sort(
+  return [...byId.values()].map(publicEmployee).sort(
     (a, b) => (b.behavior_score || 0) - (a.behavior_score || 0)
   );
+}
+
+function eventFromRow(row, source) {
+  return {
+    event_type: row.event_type || row.type || "event",
+    type: row.event_type || row.type || "event",
+    timestamp: row.timestamp || row.created_at || row.date || null,
+    person_id: row.person_id || row.employee_id || null,
+    person_name:
+      row.display_name || row.person_name || row.employee_name || row.person_id,
+    camera_id: row.camera_id || null,
+    camera_name: row.camera_name || row.camera_id || null,
+    confidence: row.confidence ?? null,
+    status: row.status || null,
+    source,
+  };
+}
+
+async function eventsFromLiveData(token, limit = 200) {
+  const violations = await findScopedDocs("violations", token, {
+    sort: { timestamp: -1 },
+    limit,
+  });
+  if (violations.length) return violations.map(withSnapshotUrl);
+
+  const [today] = await findScopedDocs("daily_analytics", token, {
+    sort: { date: -1 },
+    limit: 1,
+  });
+  const recent = Array.isArray(today?.recent_behaviors)
+    ? today.recent_behaviors
+    : [];
+  if (recent.length) {
+    return recent.slice(0, limit).map((row) =>
+      eventFromRow({ ...row, date: today.date }, "daily_analytics")
+    );
+  }
+
+  const samples = await findScopedDocs("behavior_samples", token, {
+    sort: { timestamp: -1 },
+    limit: Math.min(limit, 80),
+  });
+  const events = [];
+  for (const sample of samples) {
+    const alerts = Array.isArray(sample.alerts) ? sample.alerts : [];
+    const persons = Array.isArray(sample.persons) ? sample.persons : [];
+    if (!alerts.length) continue;
+    for (const alert of alerts) {
+      const person = persons[0] || {};
+      events.push(
+        eventFromRow(
+          {
+            event_type: alert.event_type || alert.type || "alert",
+            timestamp: sample.timestamp,
+            camera_id: sample.camera_id,
+            camera_name: sample.camera_name,
+            person_id: alert.person_id || person.person_id,
+            display_name: alert.display_name || person.display_name,
+            confidence: alert.confidence,
+          },
+          "behavior_samples"
+        )
+      );
+      if (events.length >= limit) return events;
+    }
+  }
+  return events;
 }
 
 /** POST /api/auth/org-token  { token } — Mongo org_tokens */
@@ -290,9 +441,13 @@ const listViolations = async (req, res) => {
               .lean()
           );
 
+    const violations = rows.length
+      ? rows.map(withSnapshotUrl)
+      : await eventsFromLiveData(token, limit);
+
     return res.status(200).json({
       ok: true,
-      violations: rows.map(withSnapshotUrl),
+      violations,
       organization: toPublicOrg(org),
     });
   } catch (error) {
@@ -315,10 +470,19 @@ const listSnapshots = async (req, res) => {
       sort: { timestamp: -1 },
       limit: Math.max(limit * 4, 80),
     });
+    const extra = rows.length
+      ? []
+      : await findScopedDocs("behavior_snapshots", token, {
+          extra: {
+            local_snapshot: { $exists: true, $nin: [null, ""] },
+          },
+          sort: { timestamp: -1 },
+          limit: Math.max(limit * 4, 80),
+        });
 
     const snapshots = [];
     const seen = new Set();
-    for (const row of rows) {
+    for (const row of [...rows, ...extra]) {
       const rel = snapshotRelFromDoc(row);
       if (!rel || seen.has(rel)) continue;
       seen.add(rel);
@@ -460,13 +624,16 @@ const listPersons = async (req, res) => {
       limit: 500,
     });
 
-    const persons = result.fromAi
+    const persons = (result.fromAi
       ? result.body.persons ||
         result.body.people ||
         result.body.staff ||
         result.picked ||
         []
-      : result.rows;
+      : result.rows
+    ).map((row) =>
+      result.fromAi ? stripHeavyFields(row) : publicEmployee(row)
+    );
 
     return res.status(200).json({
       ok: true,
@@ -619,6 +786,15 @@ const listEmployees = async (req, res) => {
     if (!auth) return;
     const { token, org } = auth;
 
+    const fromMongo = await employeesFromLiveData(token);
+    if (fromMongo.length) {
+      return res.status(200).json({
+        ok: true,
+        employees: fromMongo,
+        organization: toPublicOrg(org),
+      });
+    }
+
     try {
       const ai = await fetchAiEmployees(token);
       const employees =
@@ -626,7 +802,9 @@ const listEmployees = async (req, res) => {
       if (ai.status >= 200 && ai.status < 300 && hasUsefulAiPayload(employees)) {
         return res.status(200).json({
           ok: true,
-          employees,
+          employees: employees.map((row) =>
+            row && typeof row === "object" ? publicEmployee(row) : row
+          ),
           organization: toPublicOrg(org),
         });
       }
@@ -636,7 +814,7 @@ const listEmployees = async (req, res) => {
 
     return res.status(200).json({
       ok: true,
-      employees: await employeesFromLiveData(token),
+      employees: fromMongo,
       organization: toPublicOrg(org),
     });
   } catch (error) {
@@ -700,7 +878,7 @@ const getEmployeeProfile = async (req, res) => {
 
     return res.status(200).json({
       ok: true,
-      employee: person,
+      employee: publicEmployee(person),
       organization: toPublicOrg(org),
     });
   } catch (error) {
