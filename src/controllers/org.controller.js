@@ -151,11 +151,21 @@ function stripHeavyFields(row) {
 function jpegBuffer(value) {
   if (!value) return null;
   if (Buffer.isBuffer(value)) return value.length > 32 ? value : null;
+  if (typeof value.value === "function" && typeof value.sub_type === "number") {
+    try {
+      const raw = value.value(true);
+      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      return buf.length > 32 ? buf : null;
+    } catch (_) {
+      // fall through to other Binary shapes
+    }
+  }
   if (
     value._bsontype === "Binary" ||
     (value.buffer && value.sub_type !== undefined)
   ) {
-    const buf = Buffer.from(value.buffer);
+    const src = value.buffer || value;
+    const buf = Buffer.isBuffer(src) ? src : Buffer.from(src);
     return buf.length > 32 ? buf : null;
   }
   if (Array.isArray(value) && value.length && typeof value[0] === "number") {
@@ -204,8 +214,11 @@ function snapshotJpegFromDoc(row) {
   if (!row) return null;
   const nested = asObject(row.snapshots);
   return (
+    jpegBuffer(row.snapshot_jpeg) ||
+    jpegBuffer(row.mongo_jpeg_bytes) ||
     jpegBuffer(nested.jpg) ||
     jpegBuffer(nested.jpeg) ||
+    jpegBuffer(nested.snapshot_jpeg) ||
     jpegBuffer(row["snapshots.jpg"]) ||
     jpegBuffer(row.snapshots_jpg) ||
     jpegBuffer(row.jpg) ||
@@ -474,16 +487,32 @@ async function employeeDetailFromLiveData(token, personId) {
   });
   let snapshotRows = snapshots;
   if (!snapshotRows.length) {
+    const cameraId = base.last_camera_id || identity?.last_camera_id;
     const recentSnaps = await findScopedDocs("behavior_snapshots", token, {
       sort: { timestamp: -1 },
       limit: 40,
     });
     snapshotRows = recentSnaps.filter((row) => {
-      const id = String(
-        row.person_id || row.employee_id || row.track_id || ""
-      );
-      return id === personId || id === base.name;
+      const ids = [
+        row.person_id,
+        row.employee_id,
+        row.track_id,
+        ...(Array.isArray(row.person_ids) ? row.person_ids : []),
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      if (ids.includes(personId) || ids.includes(base.name)) return true;
+      if (!ids.length && cameraId) {
+        return (
+          String(row.camera_id || "") === String(cameraId) ||
+          String(row.camera_name || "") === String(cameraId)
+        );
+      }
+      return false;
     });
+    if (!snapshotRows.length) {
+      snapshotRows = recentSnaps.slice(0, 12);
+    }
   }
 
   const history = await findScopedDocs("daily_analytics", token, {
@@ -832,7 +861,14 @@ const proxyMedia = async (req, res) => {
         limit: 1,
       });
       const buf = snapshotJpegFromDoc(row);
-      if (buf) return sendJpeg(res, buf);
+      if (buf) {
+        if (row.snapshot_jpeg_content_type) {
+          res.setHeader("Content-Type", row.snapshot_jpeg_content_type);
+          res.setHeader("Cache-Control", "private, max-age=300");
+          return res.status(200).send(buf);
+        }
+        return sendJpeg(res, buf);
+      }
       if (row) {
         const rel = snapshotRelFromDoc(row);
         if (rel && /^https?:\/\//i.test(rel)) {
