@@ -13,7 +13,7 @@ function aiBackendBase() {
 
 async function aiMobileFetch(pathWithQuery, token) {
   const url = `${aiBackendBase()}${pathWithQuery}`;
-  const timeoutMs = Number(process.env.AI_PROXY_TIMEOUT_MS || 2500);
+  const timeoutMs = Number(process.env.AI_PROXY_TIMEOUT_MS || 60000);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -38,9 +38,10 @@ async function aiMobileFetch(pathWithQuery, token) {
 
     return { status: response.status, body };
   } catch (error) {
+    console.error("Garage AI proxy idle:", error?.message || error);
     return {
       status: 0,
-      body: { message: error?.message || "Garage AI proxy timed out" },
+      body: { ok: false, idle: true, message: "AI is idle" },
     };
   } finally {
     clearTimeout(timer);
@@ -106,7 +107,10 @@ async function fetchAiMedia(relPath, token) {
   const rel = String(relPath || "").replace(/^\/+/, "");
   if (!rel) return null;
   const encoded = encodeURIComponent(rel);
-  const timeoutMs = Number(process.env.AI_PROXY_TIMEOUT_MS || 2500);
+  const timeoutMs = Math.min(
+    Number(process.env.AI_PROXY_TIMEOUT_MS || 60000),
+    12000
+  );
   const candidates = [
     `${aiBackendBase()}/${rel}`,
     `${aiBackendBase()}/snapshots/${rel.replace(/^snapshots\//, "")}`,

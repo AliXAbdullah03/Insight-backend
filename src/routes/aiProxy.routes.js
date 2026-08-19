@@ -1,13 +1,18 @@
 const express = require("express");
 const { extractOrgToken } = require("../services/org.service");
 const { aiBackendBase } = require("../services/aiProxy.service");
-const { statusCodeTemplate } = require("../utils/api.utils");
 
 /**
  * Forward /api/ai/* → {AI_BACKEND_URL}/api/*
  * Fixes Flutter web CORS when Chrome cannot call the Cloudflare AI host.
  */
+const AI_IDLE_BODY = { ok: false, idle: true, message: "AI is idle" };
+
 async function proxyAiApi(req, res) {
+  const timeoutMs = Number(process.env.AI_PROXY_TIMEOUT_MS || 60000);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const token = extractOrgToken(req);
     // req.url is relative to this mount (includes query string).
@@ -24,6 +29,7 @@ async function proxyAiApi(req, res) {
     const init = {
       method: req.method,
       headers,
+      signal: controller.signal,
     };
 
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -34,6 +40,10 @@ async function proxyAiApi(req, res) {
     }
 
     const upstream = await fetch(targetUrl, init);
+    if (upstream.status >= 500) {
+      return res.status(503).json(AI_IDLE_BODY);
+    }
+
     const text = await upstream.text();
     const contentType = upstream.headers.get("content-type") || "";
 
@@ -48,12 +58,10 @@ async function proxyAiApi(req, res) {
     if (contentType) res.type(contentType);
     return res.send(text);
   } catch (error) {
-    console.error("AI API proxy failed:", error.message);
-    return statusCodeTemplate(
-      res,
-      502,
-      `Garage AI proxy failed: ${error.message}`
-    );
+    console.error("AI API proxy idle:", error.message);
+    return res.status(503).json(AI_IDLE_BODY);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
