@@ -19,6 +19,7 @@ const OrgToken = require("../models/orgToken.model");
 const Violation = require("../models/violation.model");
 const GarageCameraStatus = require("../models/garageCameraStatus.model");
 const { statusCodeTemplate, catchTemplate } = require("../utils/api.utils");
+const mongoose = require("mongoose");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -137,7 +138,130 @@ function stripHeavyFields(row) {
   delete obj.embeddings;
   delete obj.enrolled_photo_jpeg;
   delete obj.payload;
+  if (obj.snapshots && typeof obj.snapshots === "object") {
+    const snaps = { ...obj.snapshots };
+    delete snaps.jpg;
+    delete snaps.jpeg;
+    obj.snapshots = snaps;
+  }
+  delete obj["snapshots.jpg"];
   return obj;
+}
+
+function jpegBuffer(value) {
+  if (!value) return null;
+  if (Buffer.isBuffer(value)) return value.length > 32 ? value : null;
+  if (
+    value._bsontype === "Binary" ||
+    (value.buffer && value.sub_type !== undefined)
+  ) {
+    const buf = Buffer.from(value.buffer);
+    return buf.length > 32 ? buf : null;
+  }
+  if (Array.isArray(value) && value.length && typeof value[0] === "number") {
+    const buf = Buffer.from(value);
+    return buf.length > 32 ? buf : null;
+  }
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (s.startsWith("data:image/")) {
+      const comma = s.indexOf(",");
+      if (comma < 0) return null;
+      try {
+        const buf = Buffer.from(s.slice(comma + 1), "base64");
+        return buf.length > 32 ? buf : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    if (
+      s.startsWith("/9j/") ||
+      s.startsWith("iVBOR") ||
+      /^[A-Za-z0-9+/]+=*$/.test(s.slice(0, 48))
+    ) {
+      try {
+        const buf = Buffer.from(s, "base64");
+        return buf.length > 32 ? buf : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    return (
+      jpegBuffer(value.jpg) ||
+      jpegBuffer(value.jpeg) ||
+      jpegBuffer(value.data) ||
+      jpegBuffer(value.binary) ||
+      jpegBuffer(value.enrolled_photo_jpeg)
+    );
+  }
+  return null;
+}
+
+function snapshotJpegFromDoc(row) {
+  if (!row) return null;
+  const nested = asObject(row.snapshots);
+  return (
+    jpegBuffer(nested.jpg) ||
+    jpegBuffer(nested.jpeg) ||
+    jpegBuffer(row["snapshots.jpg"]) ||
+    jpegBuffer(row.snapshots_jpg) ||
+    jpegBuffer(row.jpg) ||
+    jpegBuffer(row.jpeg) ||
+    jpegBuffer(row.image) ||
+    jpegBuffer(row.snapshot) ||
+    jpegBuffer(row.frame)
+  );
+}
+
+function publicMediaUrl(query) {
+  const params = new URLSearchParams(query);
+  return `/api/mobile/media?${params.toString()}`;
+}
+
+function jpegContentType(buf) {
+  if (buf[0] === 0x89 && buf[1] === 0x50) return "image/png";
+  if (buf[0] === 0xff && buf[1] === 0xd8) return "image/jpeg";
+  if (buf[0] === 0x52 && buf[1] === 0x49) return "image/webp";
+  return "image/jpeg";
+}
+
+function sendJpeg(res, buf) {
+  res.setHeader("Content-Type", jpegContentType(buf));
+  res.setHeader("Cache-Control", "private, max-age=300");
+  return res.status(200).send(buf);
+}
+
+function publicBehaviorSnapshot(row) {
+  if (!row) return null;
+  const id = String(row._id || row.snapshot_id || "");
+  const timestamp = row.timestamp || row.created_at || null;
+  const cameraName = row.camera_name || row.camera_id || null;
+  const eventType = row.event_type || row.kind || row.type || null;
+  const personId = row.person_id || row.employee_id || null;
+  if (id && snapshotJpegFromDoc(row)) {
+    return {
+      id,
+      image_url: publicMediaUrl({ kind: "snapshot", id }),
+      timestamp,
+      camera_name: cameraName,
+      event_type: eventType,
+      person_id: personId,
+    };
+  }
+  const rel = snapshotRelFromDoc(row);
+  if (!rel) return null;
+  return {
+    id: id || rel,
+    path: rel,
+    image_url: publicSnapshotUrl(rel),
+    timestamp,
+    camera_name: cameraName,
+    event_type: eventType,
+    person_id: personId,
+  };
 }
 
 function personKey(row) {
@@ -145,6 +269,11 @@ function personKey(row) {
 }
 
 function publicEmployee(row) {
+  const hasPhoto = Boolean(
+    row?.has_enrolled_photo ||
+      jpegBuffer(row?.enrolled_photo_jpeg) ||
+      jpegBuffer(asObject(row?.identity).enrolled_photo_jpeg)
+  );
   const raw = stripHeavyFields(row);
   const scores = asObject(raw.scores);
   const incidents = asObject(raw.incidents);
@@ -165,11 +294,18 @@ function publicEmployee(row) {
     scores.behavior_score ?? raw.behavior_score ?? raw.score,
     0
   );
+  const photoUrl =
+    hasPhoto && personId
+      ? publicMediaUrl({ kind: "enrolled", person_id: personId })
+      : null;
   return {
     person_id: personId,
     employee_id: personId,
     name,
     display_name: name,
+    photo_url: photoUrl,
+    avatar: photoUrl,
+    has_photo: Boolean(photoUrl),
     behavior_score: behaviorScore,
     score: behaviorScore,
     productivity_score: asNumber(
@@ -224,6 +360,7 @@ async function employeesFromLiveData(token) {
     byId.set(id, {
       ...stripHeavyFields(identity),
       person_id: id,
+      has_enrolled_photo: Boolean(jpegBuffer(identity.enrolled_photo_jpeg)),
       identity: stripHeavyFields(identity),
     });
   }
@@ -235,6 +372,9 @@ async function employeesFromLiveData(token) {
       ...prev,
       ...stripHeavyFields(profile),
       person_id: id,
+      has_enrolled_photo:
+        Boolean(prev.has_enrolled_photo) ||
+        Boolean(jpegBuffer(profile.enrolled_photo_jpeg)),
       identity: {
         ...asObject(prev.identity),
         ...asObject(profile.identity),
@@ -310,6 +450,7 @@ async function employeeDetailFromLiveData(token, personId) {
   const merged = {
     ...(identity || {}),
     ...(profile || {}),
+    has_enrolled_photo: Boolean(jpegBuffer(identity?.enrolled_photo_jpeg)),
     identity: stripHeavyFields({
       ...asObject(identity),
       ...asObject(profile?.identity),
@@ -322,23 +463,28 @@ async function employeeDetailFromLiveData(token, personId) {
       $or: [
         { person_id: personId },
         { employee_id: personId },
+        { track_id: personId },
         { person_ids: personId },
         { "persons.person_id": personId },
+        { display_name: base.name },
       ],
     },
     sort: { timestamp: -1 },
     limit: 12,
   });
-  const cameraId = base.last_camera_id || identity?.last_camera_id;
-  const snapshotRows = snapshots.length
-    ? snapshots
-    : cameraId
-      ? await findScopedDocs("behavior_snapshots", token, {
-          extra: { camera_id: cameraId },
-          sort: { timestamp: -1 },
-          limit: 6,
-        })
-      : [];
+  let snapshotRows = snapshots;
+  if (!snapshotRows.length) {
+    const recentSnaps = await findScopedDocs("behavior_snapshots", token, {
+      sort: { timestamp: -1 },
+      limit: 40,
+    });
+    snapshotRows = recentSnaps.filter((row) => {
+      const id = String(
+        row.person_id || row.employee_id || row.track_id || ""
+      );
+      return id === personId || id === base.name;
+    });
+  }
 
   const history = await findScopedDocs("daily_analytics", token, {
     sort: { date: -1 },
@@ -378,19 +524,7 @@ async function employeeDetailFromLiveData(token, personId) {
 
   return {
     ...base,
-    snapshots: snapshotRows
-      .map((row) => {
-        const rel = snapshotRelFromDoc(row);
-        if (!rel) return null;
-        return {
-          path: rel,
-          image_url: publicSnapshotUrl(rel),
-          timestamp: row.timestamp || row.created_at || null,
-          camera_name: row.camera_name || row.camera_id || null,
-          event_type: row.event_type || row.kind || null,
-        };
-      })
-      .filter(Boolean),
+    snapshots: snapshotRows.map(publicBehaviorSnapshot).filter(Boolean),
     recent_events: recent.slice(0, 20),
     chart,
     peers,
@@ -599,6 +733,19 @@ const listSnapshots = async (req, res) => {
     const { token, org } = auth;
     const limit = Math.min(Number(req.query.limit) || 12, 50);
 
+    const liveRows = await findScopedDocs("behavior_snapshots", token, {
+      sort: { timestamp: -1 },
+      limit,
+    });
+    const live = liveRows.map(publicBehaviorSnapshot).filter(Boolean);
+    if (live.length) {
+      return res.status(200).json({
+        ok: true,
+        snapshots: live.slice(0, limit),
+        organization: toPublicOrg(org),
+      });
+    }
+
     const rows = await findScopedDocs("violations", token, {
       extra: {
         local_snapshot: { $exists: true, $nin: [null, ""] },
@@ -606,30 +753,15 @@ const listSnapshots = async (req, res) => {
       sort: { timestamp: -1 },
       limit: Math.max(limit * 4, 80),
     });
-    const extra = rows.length
-      ? []
-      : await findScopedDocs("behavior_snapshots", token, {
-          extra: {
-            local_snapshot: { $exists: true, $nin: [null, ""] },
-          },
-          sort: { timestamp: -1 },
-          limit: Math.max(limit * 4, 80),
-        });
 
     const snapshots = [];
     const seen = new Set();
-    for (const row of [...rows, ...extra]) {
-      const rel = snapshotRelFromDoc(row);
-      if (!rel || seen.has(rel)) continue;
-      seen.add(rel);
-      snapshots.push({
-        path: rel,
-        event_type: row.event_type || row.type || null,
-        camera_id: row.camera_id || null,
-        camera_name: row.camera_name || row.camera_id || null,
-        timestamp: row.timestamp || row.created_at || null,
-        image_url: publicSnapshotUrl(rel),
-      });
+    for (const row of rows) {
+      const item = publicBehaviorSnapshot(row);
+      const key = item?.image_url || item?.path;
+      if (!item || !key || seen.has(key)) continue;
+      seen.add(key);
+      snapshots.push(item);
       if (snapshots.length >= limit) break;
     }
 
@@ -643,12 +775,73 @@ const listSnapshots = async (req, res) => {
   }
 };
 
-/** GET /mobile/media?path=snapshots/cam_1/file.jpg */
+/** GET /mobile/media?kind=enrolled&person_id=person_00001 */
 const proxyMedia = async (req, res) => {
   try {
     const auth = await requireValidOrg(req, res);
     if (!auth) return;
     const { token } = auth;
+    const kind = String(req.query.kind || "").trim().toLowerCase();
+
+    if (kind === "enrolled") {
+      const personId = String(req.query.person_id || "").trim();
+      if (!personId) {
+        return statusCodeTemplate(res, 400, "Missing person_id");
+      }
+      const extra = {
+        $or: [
+          { person_id: personId },
+          { employee_id: personId },
+          { track_id: personId },
+        ],
+      };
+      const [identity] = await findScopedDocs("person_identities", token, {
+        extra,
+        limit: 1,
+      });
+      const buf =
+        jpegBuffer(identity?.enrolled_photo_jpeg) ||
+        jpegBuffer(
+          (
+            await findScopedDocs("employee_profiles", token, {
+              extra,
+              limit: 1,
+            })
+          )[0]?.enrolled_photo_jpeg
+        );
+      if (!buf) {
+        return statusCodeTemplate(res, 404, "Enrolled photo not found.");
+      }
+      return sendJpeg(res, buf);
+    }
+
+    if (kind === "snapshot") {
+      const id = String(req.query.id || "").trim();
+      if (!id) {
+        return statusCodeTemplate(res, 400, "Missing snapshot id");
+      }
+      const extra = mongoose.Types.ObjectId.isValid(id)
+        ? {
+            $or: [{ _id: new mongoose.Types.ObjectId(id) }, { _id: id }],
+          }
+        : {
+            $or: [{ snapshot_id: id }, { filename: id }],
+          };
+      const [row] = await findScopedDocs("behavior_snapshots", token, {
+        extra,
+        limit: 1,
+      });
+      const buf = snapshotJpegFromDoc(row);
+      if (buf) return sendJpeg(res, buf);
+      if (row) {
+        const rel = snapshotRelFromDoc(row);
+        if (rel && /^https?:\/\//i.test(rel)) {
+          return res.redirect(rel);
+        }
+      }
+      return statusCodeTemplate(res, 404, "Snapshot image is not available.");
+    }
+
     const rel = safeSnapshotRel(req.query.path);
     if (!rel) {
       return statusCodeTemplate(res, 400, "Invalid snapshot path.");
@@ -664,7 +857,18 @@ const proxyMedia = async (req, res) => {
       },
       limit: 1,
     });
-    if (!owned.length) {
+    const snapOwned = owned.length
+      ? owned
+      : await findScopedDocs("behavior_snapshots", token, {
+          extra: {
+            $or: [
+              { local_snapshot: rel },
+              { local_snapshot: { $regex: `${escaped}$` } },
+            ],
+          },
+          limit: 1,
+        });
+    if (!snapOwned.length) {
       return statusCodeTemplate(
         res,
         404,
